@@ -1,5 +1,4 @@
 import hashlib
-import json
 import logging
 from pathlib import Path
 from urllib.parse import urlparse
@@ -7,7 +6,7 @@ from urllib.parse import urlparse
 import aiohttp
 import discord
 
-from src.database import get_last_message_id
+from src.database import precut_post_exists
 
 logger = logging.getLogger(__name__)
 
@@ -72,33 +71,26 @@ def get_precuts_from_message(message: discord.Message, user_id: int):
     return precuts
 
 
-async def get_channel_precuts(channel: discord.TextChannel, fresh=False):
-    precuts = []
-    history = channel.history(limit=None)
+def filter_pending_precuts(precuts: list[dict]) -> list[dict]:
+    return [precut for precut in precuts if not precut_post_exists(precut["id"])]
 
-    # getting the last message
-    if fresh:
-        logger.info("Syncing channel %s from the start", channel.name)
-        history = channel.history(limit=None)
-    else:
-        last_message_id = get_last_message_id(channel.id)
-        if not last_message_id:
-            history = channel.history(limit=None)
-            logger.info("Syncing channel %s from the start", channel.name)
-        else:
-            history = channel.history(
-                limit=None, after=discord.Object(id=last_message_id), oldest_first=True
-            )
-            logger.info(
-                "Syncing channel %s after message %d", channel.name, last_message_id
-            )
 
-    async for message in history:
-        attachments = get_precuts_from_message(message, message.author.id)
-        precuts.extend(attachments)
+async def get_channel_precuts(channel: discord.TextChannel) -> list[dict]:
+    precuts: list[dict] = []
 
-    if fresh:
-        with open("src/precuts.json") as file:
-            json.dump(precuts, file)
+    logger.info("Scanning channel #%s for precuts", channel.name)
+
+    async for message in channel.history(limit=None):
+        precuts.extend(get_precuts_from_message(message, message.author.id))
+
+    pending = filter_pending_precuts(precuts)
+
+    logger.info(
+        "Channel #%s: %d total precuts, %d indexed, %d remaining",
+        channel.name,
+        len(precuts),
+        len(precuts) - len(pending),
+        len(pending),
+    )
 
     return precuts

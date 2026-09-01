@@ -7,7 +7,7 @@ from src.database import add_channel, get_channels
 from src.embed import similar_embed
 from src.embedding import search_similar
 from src.index import process_precuts
-from src.precut import get_channel_precuts, get_precuts_from_message
+from src.precut import filter_pending_precuts, get_channel_precuts, get_precuts_from_message
 from src.sync import remove_precut_posts_for_message, sync_channel_deletions
 
 logger = logging.getLogger(__name__)
@@ -44,7 +44,7 @@ async def on_ready():
 
         await sync_channel_deletions(dchannel)
         precuts = await get_channel_precuts(dchannel)
-        await process_precuts(precuts)
+        await process_precuts(precuts, channel_name=dchannel.name)
 
     await client.tree.sync()
 
@@ -79,7 +79,8 @@ async def on_message(message: discord.Message):
     if message.channel.id in registered_channel_ids:
         precuts = get_precuts_from_message(message, message.author.id)
         if precuts:
-            await process_precuts(precuts)
+            channel_name = message.channel.name if hasattr(message.channel, "name") else None
+            await process_precuts(precuts, channel_name=channel_name)
 
     await client.process_commands(message)
 
@@ -125,10 +126,18 @@ async def register_channel(
 
     await sync_channel_deletions(channel)
     precuts = await get_channel_precuts(channel)
+    pending_count = len(filter_pending_precuts(precuts))
 
     await interaction.followup.send(
-        f"Added channel. Found {len(precuts)} precuts. Starting processing.",
+        f"Added channel. Found {len(precuts)} precuts, {pending_count} remaining to index.",
         ephemeral=True,
     )
 
-    await process_precuts(precuts)
+    stats = await process_precuts(precuts, channel_name=channel.name)
+
+    if stats.failed:
+        await interaction.followup.send(
+            f"Indexing finished with {stats.failed} failure(s). "
+            f"{stats.newly_indexed} newly indexed, {stats.linked} linked.",
+            ephemeral=True,
+        )

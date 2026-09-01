@@ -295,6 +295,79 @@ def indexed_precut_has_scenes(indexed_precut_id: int) -> bool:
     return cursor.fetchone() is not None
 
 
+def indexed_precut_is_fully_indexed(indexed_precut_id: int) -> bool:
+    cursor.execute(
+        """
+        SELECT
+            COUNT(DISTINCT s.id) AS scene_count,
+            COUNT(fe.frame_id) AS embedding_count
+        FROM scenes s
+        LEFT JOIN frame_embeddings fe
+            ON fe.scene_id = s.id
+        WHERE s.indexed_precut_id = %s
+        """,
+        (indexed_precut_id,),
+    )
+    row = cursor.fetchone()
+    scene_count = row["scene_count"]
+
+    if scene_count == 0:
+        return False
+
+    return row["embedding_count"] == scene_count * 3
+
+
+def reset_incomplete_indexed_precut(indexed_precut_id: int) -> None:
+    cursor.execute(
+        """
+        SELECT COUNT(*) AS post_count
+        FROM precut_posts
+        WHERE indexed_precut_id = %s
+        """,
+        (indexed_precut_id,),
+    )
+    post_count = cursor.fetchone()["post_count"]
+
+    if post_count == 0:
+        cursor.execute(
+            """
+            DELETE FROM indexed_precuts
+            WHERE id = %s
+            """,
+            (indexed_precut_id,),
+        )
+    else:
+        cursor.execute(
+            """
+            DELETE FROM scenes
+            WHERE indexed_precut_id = %s
+            """,
+            (indexed_precut_id,),
+        )
+
+    connection.commit()
+
+
+def prepare_indexed_precut(content_hash: str) -> tuple[int, bool]:
+    existing = get_indexed_precut_by_hash(content_hash)
+
+    if existing is None:
+        return get_or_create_indexed_precut(content_hash), False
+
+    indexed_precut_id = existing["id"]
+
+    if indexed_precut_is_fully_indexed(indexed_precut_id):
+        return indexed_precut_id, True
+
+    reset_incomplete_indexed_precut(indexed_precut_id)
+
+    existing = get_indexed_precut_by_hash(content_hash)
+    if existing is None:
+        return get_or_create_indexed_precut(content_hash), False
+
+    return existing["id"], False
+
+
 def add_precut_post(
     attachment_id: int,
     indexed_precut_id: int,

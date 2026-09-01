@@ -1,6 +1,7 @@
 import logging
 import subprocess
 import tempfile
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -12,15 +13,24 @@ from src.database import (
     add_frame_embedding,
     add_precut_post,
     add_scene,
-    get_indexed_precut_by_hash,
-    get_or_create_indexed_precut,
-    indexed_precut_has_scenes,
+    indexed_precut_is_fully_indexed,
+    prepare_indexed_precut,
     precut_post_exists,
 )
 from src.embedding import embed_image
-from src.precut import download_precut_from_url
+from src.precut import download_precut_from_url, filter_pending_precuts
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(slots=True)
+class ProcessingStats:
+    total: int
+    already_indexed: int
+    remaining: int
+    newly_indexed: int
+    linked: int
+    failed: int
 
 
 def parse_created_at(value: datetime | str) -> datetime:
@@ -220,130 +230,117 @@ async def link_precut_post(precut: dict, indexed_precut_id: int) -> bool:
     )
 
 
-async def process_precuts(precuts) -> None:
-    total_precuts = len(precuts)
+async def process_precuts(
+    precuts,
+    *,
+    channel_name: str | None = None,
+) -> ProcessingStats:
+    pending = filter_pending_precuts(precuts)
+    total = len(precuts)
+    already_indexed = total - len(pending)
+    remaining = len(pending)
 
+    context = f" in #{channel_name}" if channel_name else ""
     logger.info(
-        "Starting processing for %d precuts",
-        total_precuts,
+        "Starting sync%s: %d total, %d indexed, %d remaining",
+        context,
+        total,
+        already_indexed,
+        remaining,
     )
 
-    processed = 0
-    skipped = 0
-    failed = 0
+    stats = ProcessingStats(
+        total=total,
+        already_indexed=already_indexed,
+        remaining=remaining,
+        newly_indexed=0,
+        linked=0,
+        failed=0,
+    )
 
+    if not pending:
+        logger.info("Nothing left to index%s", context)
+        return stats
+
+    desc = f"Indexing #{channel_name}" if channel_name else "Indexing precuts"
     progress = tqdm(
-        precuts,
-        total=total_precuts,
-        desc="Processing precuts",
+        pending,
+        total=remaining,
+        desc=desc,
         unit="precut",
+        bar_format=(
+            "{desc}: {percentage:3.0f}%|{bar}| "
+            "{n_fmt}/{total_fmt} "
+            "[{elapsed}<{remaining}, {rate_fmt}] {postfix}"
+        ),
     )
 
     for precut in progress:
         attachment_id = precut["id"]
+        current_phase = "starting"
 
-        progress.set_postfix(
-            processed=processed,
-            skipped=skipped,
-            failed=failed,
-            current=attachment_id,
-        )
+        def update_progress() -> None:
+            completed = stats.newly_indexed + stats.linked + stats.failed
+            left = remaining - completed
+            progress.set_postfix(
+                left=left,
+                new=stats.newly_indexed,
+                linked=stats.linked,
+                failed=stats.failed,
+                phase=current_phase,
+                refresh=False,
+            )
+
+        update_progress()
 
         if precut_post_exists(attachment_id):
-            logger.info(
-                "[%s] Skipping already known attachment",
-                attachment_id,
-            )
-            skipped += 1
+            stats.linked += 1
             continue
-
-        logger.info(
-            "Processing precut %s (%d/%d)",
-            attachment_id,
-            processed + skipped + failed + 1,
-            total_precuts,
-        )
 
         try:
             with tempfile.TemporaryDirectory() as temp_dir_str:
                 temp_dir = Path(temp_dir_str)
 
-                logger.info(
-                    "[%s] Downloading precut",
-                    attachment_id,
-                )
+                current_phase = "download"
+                update_progress()
 
                 download_path, content_hash = await download_precut_from_url(
                     precut["attachment_url"],
                     temp_dir,
                 )
 
-                existing = get_indexed_precut_by_hash(content_hash)
-                if existing is not None:
-                    await link_precut_post(precut, existing["id"])
+                indexed_precut_id, is_complete = prepare_indexed_precut(content_hash)
+
+                if is_complete:
+                    current_phase = "link"
+                    update_progress()
+                    await link_precut_post(precut, indexed_precut_id)
+                    stats.linked += 1
                     logger.info(
                         "[%s] Linked to existing indexed precut %d (hash %s)",
                         attachment_id,
-                        existing["id"],
+                        indexed_precut_id,
                         content_hash[:12],
                     )
-                    skipped += 1
                     continue
 
-                indexed_precut_id = get_or_create_indexed_precut(content_hash)
-
-                if indexed_precut_has_scenes(indexed_precut_id):
-                    await link_precut_post(precut, indexed_precut_id)
-                    logger.info(
-                        "[%s] Linked to indexed precut %d after concurrent indexing",
-                        attachment_id,
-                        indexed_precut_id,
-                    )
-                    skipped += 1
-                    continue
-
-                logger.info(
-                    "[%s] Download complete: %s (hash %s)",
-                    attachment_id,
-                    download_path,
-                    content_hash[:12],
-                )
-
-                logger.info(
-                    "[%s] Converting to 24fps",
-                    attachment_id,
-                )
-
+                current_phase = "convert"
+                update_progress()
                 converted_path = make_precut_24fps(download_path)
 
-                logger.info(
-                    "[%s] Detecting scenes",
-                    attachment_id,
-                )
-
+                current_phase = "scenes"
+                update_progress()
                 scenes = detect_scenes(converted_path)
 
-                if indexed_precut_has_scenes(indexed_precut_id):
+                if indexed_precut_is_fully_indexed(indexed_precut_id):
+                    current_phase = "link"
+                    update_progress()
                     await link_precut_post(precut, indexed_precut_id)
-                    logger.info(
-                        "[%s] Linked to indexed precut %d after concurrent indexing",
-                        attachment_id,
-                        indexed_precut_id,
-                    )
-                    skipped += 1
+                    stats.linked += 1
                     continue
 
-                logger.info(
-                    "[%s] Detected %d scenes",
-                    attachment_id,
-                    len(scenes),
-                )
-
-                logger.info(
-                    "[%s] Generating previews",
-                    attachment_id,
-                )
-
+                current_phase = "previews"
+                update_progress()
                 previews, scene_preview_paths = make_previews(
                     converted_path,
                     scenes,
@@ -351,14 +348,8 @@ async def process_precuts(precuts) -> None:
                     PREVIEWS_DIR / content_hash,
                 )
 
-                preview_count = sum(len(paths) for paths in previews.values())
-
-                logger.info(
-                    "[%s] Saving %d scenes to database",
-                    attachment_id,
-                    len(scenes),
-                )
-
+                current_phase = "save"
+                update_progress()
                 scene_ids: dict[int, int] = {}
 
                 for scene_index, (start_time, end_time) in scenes.items():
@@ -374,23 +365,13 @@ async def process_precuts(precuts) -> None:
 
                     scene_ids[scene_index] = scene_id
 
-                logger.info(
-                    "[%s] Creating %d embeddings",
-                    attachment_id,
-                    preview_count,
-                )
+                current_phase = "embed"
+                update_progress()
 
                 for scene_index, preview_paths in previews.items():
                     scene_id = scene_ids[scene_index]
 
-                    for preview_index, preview_path in enumerate(preview_paths):
-                        logger.debug(
-                            "[%s] Embedding scene %d preview %d",
-                            attachment_id,
-                            scene_index,
-                            preview_index,
-                        )
-
+                    for preview_path in preview_paths:
                         embedding = embed_image(preview_path)
 
                         add_frame_embedding(
@@ -399,38 +380,34 @@ async def process_precuts(precuts) -> None:
                         )
 
                 await link_precut_post(precut, indexed_precut_id)
+                stats.newly_indexed += 1
 
                 logger.info(
-                    "[%s] Saved %d embeddings",
+                    "[%s] Indexed successfully (hash %s, %d scenes)",
                     attachment_id,
-                    preview_count,
+                    content_hash[:12],
+                    len(scenes),
                 )
 
-            processed += 1
-
-            logger.info(
-                "[%s] Finished successfully",
-                attachment_id,
-            )
-
         except Exception:
-            failed += 1
-
+            stats.failed += 1
             logger.exception(
                 "[%s] Failed to process precut",
                 attachment_id,
             )
 
-        progress.set_postfix(
-            processed=processed,
-            skipped=skipped,
-            failed=failed,
-        )
+        update_progress()
 
     logger.info(
-        "Finished processing precuts. Processed: %d, Skipped: %d, Failed: %d, Total: %d",
-        processed,
-        skipped,
-        failed,
-        total_precuts,
+        "Finished sync%s: %d total, %d already indexed, %d newly indexed, "
+        "%d linked, %d failed, %d remaining",
+        context,
+        stats.total,
+        stats.already_indexed,
+        stats.newly_indexed,
+        stats.linked,
+        stats.failed,
+        stats.remaining - stats.newly_indexed - stats.linked - stats.failed,
     )
+
+    return stats
