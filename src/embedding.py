@@ -1,0 +1,40 @@
+import tempfile
+from pathlib import Path
+
+import discord
+import numpy as np
+from numpy.typing import NDArray
+from PIL import Image
+from sentence_transformers import SentenceTransformer
+
+from src.database import search_similar_frames
+
+model = SentenceTransformer("sentence-transformers/clip-ViT-B-32")
+
+
+def embed_image(path: Path) -> NDArray[np.float32]:
+    image = Image.open(path).convert("RGB")
+
+    embedding = model.encode(
+        image,
+        normalize_embeddings=True,
+    )
+
+    return np.asarray(embedding, dtype=np.float32)
+
+
+async def search_similar(image: discord.Attachment):
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_dir = Path(temp_dir)
+
+        image_path = temp_dir / image.filename
+        await image.save(image_path)
+
+        embedding = embed_image(image_path)
+
+        results = search_similar_frames(
+            embedding,
+            limit=5,
+        )
+
+        return results
