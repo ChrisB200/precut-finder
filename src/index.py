@@ -6,6 +6,7 @@ from pathlib import Path
 from scenedetect import ContentDetector, detect
 from tqdm import tqdm
 
+from src.config import PREVIEWS_DIR
 from src.database import add_frame_embedding, add_precut, add_scene
 from src.embedding import embed_image
 from src.precut import download_precut_from_url
@@ -76,6 +77,7 @@ def generate_preview(
     video_path: Path,
     seconds: float,
     output_path: Path,
+    scale_height: int | None = None,
 ) -> None:
     logger.debug(
         "Generating preview at %.2fs -> %s",
@@ -83,20 +85,35 @@ def generate_preview(
         output_path,
     )
 
-    subprocess.run(
+    command = [
+        "ffmpeg",
+        "-ss",
+        str(seconds),
+        "-i",
+        str(video_path),
+        "-frames:v",
+        "1",
+    ]
+
+    if scale_height is not None:
+        command.extend(
+            [
+                "-vf",
+                f"scale=-2:{scale_height}",
+            ]
+        )
+
+    command.extend(
         [
-            "ffmpeg",
-            "-ss",
-            str(seconds),
-            "-i",
-            str(video_path),
-            "-frames:v",
-            "1",
             "-q:v",
             "2",
             "-y",
             str(output_path),
-        ],
+        ]
+    )
+
+    subprocess.run(
+        command,
         check=True,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -106,17 +123,24 @@ def generate_preview(
 def make_previews(
     video_path: Path,
     scenes: dict[int, tuple[float, float]],
-    previews_dir: Path,
-) -> dict[int, list[Path]]:
+    temp_previews_dir: Path,
+    persistent_previews_dir: Path,
+) -> tuple[dict[int, list[Path]], dict[int, Path]]:
     logger.debug(
         "Generating previews for %d scenes",
         len(scenes),
     )
 
+    persistent_previews_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
     previews: dict[int, list[Path]] = {}
+    preview_paths: dict[int, Path] = {}
 
     for scene_index, (start, end) in scenes.items():
-        scene_dir = previews_dir / str(scene_index)
+        scene_dir = temp_previews_dir / str(scene_index)
 
         scene_dir.mkdir(
             parents=True,
@@ -131,27 +155,42 @@ def make_previews(
             start + duration * 0.75,
         ]
 
-        scene_previews: list[Path] = []
+        start_preview_path = scene_dir / "0.jpg"
+        middle_preview_path = persistent_previews_dir / f"{scene_index}.jpg"
+        end_preview_path = scene_dir / "2.jpg"
 
-        for preview_index, timestamp in enumerate(preview_times):
-            output_path = scene_dir / f"{preview_index}.jpg"
+        generate_preview(
+            video_path,
+            preview_times[0],
+            start_preview_path,
+        )
 
-            generate_preview(
-                video_path,
-                timestamp,
-                output_path,
-            )
+        generate_preview(
+            video_path,
+            preview_times[1],
+            middle_preview_path,
+            scale_height=480,
+        )
 
-            scene_previews.append(output_path)
+        generate_preview(
+            video_path,
+            preview_times[2],
+            end_preview_path,
+        )
 
-        previews[scene_index] = scene_previews
+        previews[scene_index] = [
+            start_preview_path,
+            middle_preview_path,
+            end_preview_path,
+        ]
+        preview_paths[scene_index] = middle_preview_path
 
     logger.debug(
         "Generated %d preview images",
         sum(len(paths) for paths in previews.values()),
     )
 
-    return previews
+    return previews, preview_paths
 
 
 async def process_precuts(precuts) -> None:
@@ -239,10 +278,11 @@ async def process_precuts(precuts) -> None:
                     precut_id,
                 )
 
-                previews = make_previews(
+                previews, scene_preview_paths = make_previews(
                     converted_path,
                     scenes,
                     temp_dir / "previews",
+                    PREVIEWS_DIR / str(precut_id),
                 )
 
                 preview_count = sum(len(paths) for paths in previews.values())
@@ -275,11 +315,14 @@ async def process_precuts(precuts) -> None:
                 scene_ids: dict[int, int] = {}
 
                 for scene_index, (start_time, end_time) in scenes.items():
+                    preview_path = scene_preview_paths[scene_index]
+
                     scene_id = add_scene(
                         precut_id=precut_id,
                         scene_index=scene_index,
                         start_time=start_time,
                         end_time=end_time,
+                        preview_path=str(preview_path.resolve()),
                     )
 
                     scene_ids[scene_index] = scene_id

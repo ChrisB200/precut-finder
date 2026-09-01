@@ -34,7 +34,25 @@ async def search_similar(image: discord.Attachment):
 
         results = search_similar_frames(
             embedding,
-            limit=5,
+            limit=25,
         )
 
-        return results
+        return dedupe_results_by_precut(results, limit=5)
+
+
+def dedupe_results_by_precut(results, limit: int = 5):
+    seen_precut_ids: set[int] = set()
+    deduped = []
+
+    for result in results:
+        precut_id = result["precut_id"]
+        if precut_id in seen_precut_ids:
+            continue
+
+        seen_precut_ids.add(precut_id)
+        deduped.append(result)
+
+        if len(deduped) >= limit:
+            break
+
+    return deduped

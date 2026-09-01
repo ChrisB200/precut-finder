@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS scenes (
     scene_index INTEGER NOT NULL,
     start_time DOUBLE PRECISION NOT NULL,
     end_time DOUBLE PRECISION NOT NULL,
+    preview_path TEXT,
 
     FOREIGN KEY (precut_id) REFERENCES precuts(id) ON DELETE CASCADE,
     UNIQUE (precut_id, scene_index)

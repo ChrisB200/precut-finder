@@ -21,3 +21,4 @@ def load_env(key: str, fallback: Any = None) -> Any:
 ACCESS_TOKEN = load_env("ACCESS_TOKEN")
 DB_NAME = load_env("DB_NAME")
 SCHEMA_PATH = Path(load_env("SCHEMA_PATH"))
+PREVIEWS_DIR = Path(load_env("PREVIEWS_DIR", "./data/previews"))

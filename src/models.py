@@ -43,6 +43,7 @@ class Scene(FromRow):
     scene_index: int
     start_time: float
     end_time: float
+    preview_path: str | None = None
 
 
 @dataclass(slots=True)

@@ -5,9 +5,9 @@ from pathlib import Path
 import discord
 from discord.ext import commands
 
-from src.database import add_channel, get_channels, search_similar_frames
+from src.database import add_channel, get_channels
 from src.embed import similar_embed
-from src.embedding import embed_image, search_similar
+from src.embedding import search_similar
 from src.index import process_precuts
 from src.precut import get_channel_precuts
 
@@ -55,9 +55,17 @@ async def on_message(message: discord.Message):
             await message.reply("No results found.")
             return
 
-        embed = await similar_embed(client, results)
+        embed, files, view = await similar_embed(
+            client,
+            results,
+            message.author.id,
+        )
 
-        await message.reply(embed=embed)
+        if embed is None:
+            await message.reply("No results found.")
+            return
+
+        await message.reply(embed=embed, files=files, view=view)
         return
 
     await client.process_commands(message)

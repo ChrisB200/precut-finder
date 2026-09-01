@@ -19,6 +19,12 @@ cursor = connection.cursor(cursor_factory=RealDictCursor)
 def init_database():
     schema = SCHEMA_PATH.read_text()
     cursor.execute(schema)
+    cursor.execute(
+        """
+        ALTER TABLE scenes
+        ADD COLUMN IF NOT EXISTS preview_path TEXT
+        """
+    )
     register_vector(connection)
     connection.commit()
 
@@ -68,7 +74,11 @@ def add_channel(id: int):
 
 
 def add_scene(
-    precut_id: int, scene_index: int, start_time: float, end_time: float
+    precut_id: int,
+    scene_index: int,
+    start_time: float,
+    end_time: float,
+    preview_path: str | None = None,
 ) -> int:
     cursor.execute(
         """
@@ -76,12 +86,13 @@ def add_scene(
             precut_id,
             scene_index,
             start_time,
-            end_time
+            end_time,
+            preview_path
         )
-        VALUES (%s, %s, %s, %s)
+        VALUES (%s, %s, %s, %s, %s)
         RETURNING id
     """,
-        (precut_id, scene_index, start_time, end_time),
+        (precut_id, scene_index, start_time, end_time, preview_path),
     )
 
     scene_id = cursor.fetchall()[0]["id"]
@@ -166,6 +177,7 @@ def search_similar_frames(
             s.scene_index,
             s.start_time,
             s.end_time,
+            s.preview_path,
             p.message_id,
             p.channel_id,
             fe.embedding <=> %s AS distance
