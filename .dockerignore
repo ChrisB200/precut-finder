@@ -1,5 +1,8 @@
 .env
+.venv
 __pycache__
+*.pyc
+.git
 data/previews/
 precut.dump
 previews.tar.gz

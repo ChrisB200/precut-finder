@@ -4,6 +4,7 @@ from pathlib import Path
 import discord
 from psycopg2.extras import RealDictRow
 
+from src.config import PREVIEWS_DIR
 from src.utils import format_time
 
 PREVIEW_FILENAME = "preview.jpg"
@@ -26,12 +27,27 @@ def similarity_color(similarity: float) -> discord.Color:
     return discord.Color.orange()
 
 
-def preview_files(items: list[SearchResultItem], index: int) -> list[discord.File]:
-    preview_path = items[index].preview_path
-    if preview_path and Path(preview_path).is_file():
-        return [discord.File(preview_path, filename=PREVIEW_FILENAME)]
+def resolve_preview_path(preview_path: str | None) -> Path | None:
+    if not preview_path:
+        return None
 
-    return []
+    path = Path(preview_path)
+    if path.is_file():
+        return path
+
+    resolved = PREVIEWS_DIR / preview_path
+    if resolved.is_file():
+        return resolved
+
+    return None
+
+
+def preview_files(items: list[SearchResultItem], index: int) -> list[discord.File]:
+    preview_path = resolve_preview_path(items[index].preview_path)
+    if preview_path is None:
+        return []
+
+    return [discord.File(preview_path, filename=PREVIEW_FILENAME)]
 
 
 def build_search_embed(items: list[SearchResultItem], index: int) -> discord.Embed:
@@ -45,7 +61,7 @@ def build_search_embed(items: list[SearchResultItem], index: int) -> discord.Emb
     )
     embed.set_footer(text=f"Match {index + 1} of {len(items)}")
 
-    if item.preview_path and Path(item.preview_path).is_file():
+    if resolve_preview_path(item.preview_path) is not None:
         embed.set_image(url=f"attachment://{PREVIEW_FILENAME}")
 
     return embed

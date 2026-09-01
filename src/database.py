@@ -7,12 +7,32 @@ from numpy._typing import NDArray
 from pgvector.psycopg2 import register_vector
 from psycopg2.extras import RealDictCursor
 
-from src.config import DB_NAME, SCHEMA_PATH
+from src.config import DB_HOST, DB_NAME, DB_PASSWORD, DB_PORT, DB_USER, SCHEMA_PATH
 from src.models import Channel, Scene
 
 logger = logging.getLogger(__name__)
 
-connection = pg.connect(dbname=DB_NAME, cursor_factory=RealDictCursor)
+
+def _connect():
+    kwargs: dict = {
+        "dbname": DB_NAME,
+        "cursor_factory": RealDictCursor,
+    }
+
+    if DB_HOST:
+        kwargs["host"] = DB_HOST
+        kwargs["port"] = DB_PORT
+
+    if DB_USER:
+        kwargs["user"] = DB_USER
+
+    if DB_PASSWORD:
+        kwargs["password"] = DB_PASSWORD
+
+    return pg.connect(**kwargs)
+
+
+connection = _connect()
 cursor = connection.cursor(cursor_factory=RealDictCursor)
 
 

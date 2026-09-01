@@ -360,7 +360,7 @@ async def process_precuts(
                         scene_index=scene_index,
                         start_time=start_time,
                         end_time=end_time,
-                        preview_path=str(preview_path.resolve()),
+                        preview_path=f"{content_hash}/{scene_index}.jpg",
                     )
 
                     scene_ids[scene_index] = scene_id
