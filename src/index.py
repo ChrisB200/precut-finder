@@ -10,14 +10,13 @@ from tqdm import tqdm
 
 from src.config import PREVIEWS_DIR
 from src.database import (
-    add_frame_embedding,
-    add_precut_post,
-    add_scene,
+    SceneIndexRecord,
     indexed_precut_is_fully_indexed,
     prepare_indexed_precut,
     precut_post_exists,
+    save_indexed_precut,
 )
-from src.embedding import embed_image
+from src.embedding import embed_images
 from src.precut import download_precut_from_url, filter_pending_precuts
 
 logger = logging.getLogger(__name__)
@@ -220,6 +219,8 @@ def make_previews(
 
 
 async def link_precut_post(precut: dict, indexed_precut_id: int) -> bool:
+    from src.database import add_precut_post
+
     return add_precut_post(
         attachment_id=precut["id"],
         indexed_precut_id=indexed_precut_id,
@@ -341,7 +342,7 @@ async def process_precuts(
 
                 current_phase = "previews"
                 update_progress()
-                previews, scene_preview_paths = make_previews(
+                previews, _scene_preview_paths = make_previews(
                     converted_path,
                     scenes,
                     temp_dir / "previews",
@@ -350,36 +351,48 @@ async def process_precuts(
 
                 current_phase = "save"
                 update_progress()
-                scene_ids: dict[int, int] = {}
 
-                for scene_index, (start_time, end_time) in scenes.items():
-                    preview_path = scene_preview_paths[scene_index]
-
-                    scene_id = add_scene(
-                        indexed_precut_id=indexed_precut_id,
-                        scene_index=scene_index,
-                        start_time=start_time,
-                        end_time=end_time,
-                        preview_path=f"{content_hash}/{scene_index}.jpg",
-                    )
-
-                    scene_ids[scene_index] = scene_id
+                preview_paths_ordered: list[Path] = []
+                for scene_index in sorted(previews.keys()):
+                    preview_paths_ordered.extend(previews[scene_index])
 
                 current_phase = "embed"
                 update_progress()
+                all_embeddings = embed_images(preview_paths_ordered)
 
-                for scene_index, preview_paths in previews.items():
-                    scene_id = scene_ids[scene_index]
+                embedding_offset = 0
+                scene_records: list[SceneIndexRecord] = []
 
-                    for preview_path in preview_paths:
-                        embedding = embed_image(preview_path)
+                for scene_index in sorted(previews.keys()):
+                    preview_paths = previews[scene_index]
+                    scene_count = len(preview_paths)
+                    scene_embeddings = all_embeddings[
+                        embedding_offset : embedding_offset + scene_count
+                    ]
+                    embedding_offset += scene_count
 
-                        add_frame_embedding(
-                            scene_id=scene_id,
-                            embedding=embedding,
+                    start_time, end_time = scenes[scene_index]
+                    scene_records.append(
+                        SceneIndexRecord(
+                            scene_index=scene_index,
+                            start_time=start_time,
+                            end_time=end_time,
+                            preview_path=f"{content_hash}/{scene_index}.jpg",
+                            embeddings=scene_embeddings,
                         )
+                    )
 
-                await link_precut_post(precut, indexed_precut_id)
+                current_phase = "save"
+                update_progress()
+                save_indexed_precut(
+                    indexed_precut_id=indexed_precut_id,
+                    scenes=scene_records,
+                    attachment_id=precut["id"],
+                    message_id=precut["message_id"],
+                    channel_id=precut["channel_id"],
+                    user_id=precut["user_id"],
+                    created_at=parse_created_at(precut["created_at"]),
+                )
                 stats.newly_indexed += 1
 
                 logger.info(

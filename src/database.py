@@ -1,4 +1,5 @@
 import logging
+from dataclasses import dataclass
 from datetime import datetime
 
 import numpy as np
@@ -430,6 +431,89 @@ def add_precut_post(
         indexed_precut_id,
     )
     return True
+
+
+@dataclass(slots=True)
+class SceneIndexRecord:
+    scene_index: int
+    start_time: float
+    end_time: float
+    preview_path: str
+    embeddings: list[NDArray[np.float32]]
+
+
+def save_indexed_precut(
+    indexed_precut_id: int,
+    scenes: list[SceneIndexRecord],
+    attachment_id: int,
+    message_id: int,
+    channel_id: int,
+    user_id: int,
+    created_at: datetime,
+) -> None:
+    try:
+        for scene in scenes:
+            cursor.execute(
+                """
+                INSERT INTO scenes (
+                    indexed_precut_id,
+                    scene_index,
+                    start_time,
+                    end_time,
+                    preview_path
+                )
+                VALUES (%s, %s, %s, %s, %s)
+                RETURNING id
+                """,
+                (
+                    indexed_precut_id,
+                    scene.scene_index,
+                    scene.start_time,
+                    scene.end_time,
+                    scene.preview_path,
+                ),
+            )
+            scene_id = cursor.fetchone()["id"]
+
+            if scene.embeddings:
+                cursor.executemany(
+                    """
+                    INSERT INTO frame_embeddings (
+                        scene_id,
+                        embedding
+                    )
+                    VALUES (%s, %s)
+                    """,
+                    [(scene_id, embedding) for embedding in scene.embeddings],
+                )
+
+        cursor.execute(
+            """
+            INSERT INTO precut_posts (
+                attachment_id,
+                indexed_precut_id,
+                message_id,
+                channel_id,
+                user_id,
+                created_at
+            )
+            VALUES (%s, %s, %s, %s, %s, %s)
+            ON CONFLICT (attachment_id) DO NOTHING
+            """,
+            (
+                attachment_id,
+                indexed_precut_id,
+                message_id,
+                channel_id,
+                user_id,
+                created_at,
+            ),
+        )
+
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
 
 
 def add_scene(
