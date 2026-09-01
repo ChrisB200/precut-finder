@@ -1,3 +1,4 @@
+import hashlib
 import json
 import logging
 from pathlib import Path
@@ -14,18 +15,20 @@ logger = logging.getLogger(__name__)
 async def download_precut_from_url(
     url: str,
     output_dir: Path,
-) -> Path:
+) -> tuple[Path, str]:
     extension = Path(urlparse(url).path).suffix
     output_path = output_dir / f"download{extension}"
+    hasher = hashlib.sha256()
 
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as response:
             response.raise_for_status()
             with output_path.open("wb") as file:
                 async for chunk in response.content.iter_chunked(1024 * 1024):
+                    hasher.update(chunk)
                     file.write(chunk)
 
-    return output_path
+    return output_path, hasher.hexdigest()
 
 
 def get_precuts_from_message(message: discord.Message, user_id: int):

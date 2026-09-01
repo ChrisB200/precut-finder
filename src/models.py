@@ -28,8 +28,16 @@ class Channel(FromRow):
 
 
 @dataclass(slots=True)
-class Precut(FromRow):
+class IndexedPrecut(FromRow):
     id: int
+    content_hash: str
+    created_at: datetime
+
+
+@dataclass(slots=True)
+class PrecutPost(FromRow):
+    attachment_id: int
+    indexed_precut_id: int
     message_id: int
     channel_id: int
     user_id: int
@@ -39,7 +47,7 @@ class Precut(FromRow):
 @dataclass(slots=True)
 class Scene(FromRow):
     id: int
-    precut_id: int
+    indexed_precut_id: int
     scene_index: int
     start_time: float
     end_time: float

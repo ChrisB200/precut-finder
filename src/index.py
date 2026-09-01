@@ -1,17 +1,33 @@
 import logging
 import subprocess
 import tempfile
+from datetime import datetime
 from pathlib import Path
 
 from scenedetect import ContentDetector, detect
 from tqdm import tqdm
 
 from src.config import PREVIEWS_DIR
-from src.database import add_frame_embedding, add_precut, add_scene
+from src.database import (
+    add_frame_embedding,
+    add_precut_post,
+    add_scene,
+    get_indexed_precut_by_hash,
+    get_or_create_indexed_precut,
+    indexed_precut_has_scenes,
+    precut_post_exists,
+)
 from src.embedding import embed_image
 from src.precut import download_precut_from_url
 
 logger = logging.getLogger(__name__)
+
+
+def parse_created_at(value: datetime | str) -> datetime:
+    if isinstance(value, datetime):
+        return value
+
+    return datetime.fromisoformat(value)
 
 
 def make_precut_24fps(path: Path) -> Path:
@@ -193,6 +209,17 @@ def make_previews(
     return previews, preview_paths
 
 
+async def link_precut_post(precut: dict, indexed_precut_id: int) -> bool:
+    return add_precut_post(
+        attachment_id=precut["id"],
+        indexed_precut_id=indexed_precut_id,
+        message_id=precut["message_id"],
+        channel_id=precut["channel_id"],
+        user_id=precut["user_id"],
+        created_at=parse_created_at(precut["created_at"]),
+    )
+
+
 async def process_precuts(precuts) -> None:
     total_precuts = len(precuts)
 
@@ -202,6 +229,7 @@ async def process_precuts(precuts) -> None:
     )
 
     processed = 0
+    skipped = 0
     failed = 0
 
     progress = tqdm(
@@ -212,18 +240,27 @@ async def process_precuts(precuts) -> None:
     )
 
     for precut in progress:
-        precut_id = precut["id"]
+        attachment_id = precut["id"]
 
         progress.set_postfix(
             processed=processed,
+            skipped=skipped,
             failed=failed,
-            current=precut_id,
+            current=attachment_id,
         )
+
+        if precut_post_exists(attachment_id):
+            logger.info(
+                "[%s] Skipping already known attachment",
+                attachment_id,
+            )
+            skipped += 1
+            continue
 
         logger.info(
             "Processing precut %s (%d/%d)",
-            precut_id,
-            processed + failed + 1,
+            attachment_id,
+            processed + skipped + failed + 1,
             total_precuts,
         )
 
@@ -231,84 +268,94 @@ async def process_precuts(precuts) -> None:
             with tempfile.TemporaryDirectory() as temp_dir_str:
                 temp_dir = Path(temp_dir_str)
 
-                logger.debug(
-                    "Created temporary directory for precut %s: %s",
-                    precut_id,
-                    temp_dir,
-                )
-
                 logger.info(
                     "[%s] Downloading precut",
-                    precut_id,
+                    attachment_id,
                 )
 
-                download_path = await download_precut_from_url(
+                download_path, content_hash = await download_precut_from_url(
                     precut["attachment_url"],
                     temp_dir,
                 )
 
+                existing = get_indexed_precut_by_hash(content_hash)
+                if existing is not None:
+                    await link_precut_post(precut, existing["id"])
+                    logger.info(
+                        "[%s] Linked to existing indexed precut %d (hash %s)",
+                        attachment_id,
+                        existing["id"],
+                        content_hash[:12],
+                    )
+                    skipped += 1
+                    continue
+
+                indexed_precut_id = get_or_create_indexed_precut(content_hash)
+
+                if indexed_precut_has_scenes(indexed_precut_id):
+                    await link_precut_post(precut, indexed_precut_id)
+                    logger.info(
+                        "[%s] Linked to indexed precut %d after concurrent indexing",
+                        attachment_id,
+                        indexed_precut_id,
+                    )
+                    skipped += 1
+                    continue
+
                 logger.info(
-                    "[%s] Download complete: %s",
-                    precut_id,
+                    "[%s] Download complete: %s (hash %s)",
+                    attachment_id,
                     download_path,
+                    content_hash[:12],
                 )
 
                 logger.info(
                     "[%s] Converting to 24fps",
-                    precut_id,
+                    attachment_id,
                 )
 
                 converted_path = make_precut_24fps(download_path)
 
                 logger.info(
                     "[%s] Detecting scenes",
-                    precut_id,
+                    attachment_id,
                 )
 
                 scenes = detect_scenes(converted_path)
 
+                if indexed_precut_has_scenes(indexed_precut_id):
+                    await link_precut_post(precut, indexed_precut_id)
+                    logger.info(
+                        "[%s] Linked to indexed precut %d after concurrent indexing",
+                        attachment_id,
+                        indexed_precut_id,
+                    )
+                    skipped += 1
+                    continue
+
                 logger.info(
                     "[%s] Detected %d scenes",
-                    precut_id,
+                    attachment_id,
                     len(scenes),
                 )
 
                 logger.info(
                     "[%s] Generating previews",
-                    precut_id,
+                    attachment_id,
                 )
 
                 previews, scene_preview_paths = make_previews(
                     converted_path,
                     scenes,
                     temp_dir / "previews",
-                    PREVIEWS_DIR / str(precut_id),
+                    PREVIEWS_DIR / content_hash,
                 )
 
                 preview_count = sum(len(paths) for paths in previews.values())
 
                 logger.info(
-                    "[%s] Generated %d previews",
-                    precut_id,
-                    preview_count,
-                )
-
-                logger.info(
-                    "[%s] Saving precut to database",
-                    precut_id,
-                )
-
-                add_precut(
-                    id=precut["id"],
-                    message_id=precut["message_id"],
-                    channel_id=precut["channel_id"],
-                    user_id=precut["user_id"],
-                    created_at=precut["created_at"],
-                )
-
-                logger.info(
                     "[%s] Saving %d scenes to database",
-                    precut_id,
+                    attachment_id,
                     len(scenes),
                 )
 
@@ -318,7 +365,7 @@ async def process_precuts(precuts) -> None:
                     preview_path = scene_preview_paths[scene_index]
 
                     scene_id = add_scene(
-                        precut_id=precut_id,
+                        indexed_precut_id=indexed_precut_id,
                         scene_index=scene_index,
                         start_time=start_time,
                         end_time=end_time,
@@ -329,7 +376,7 @@ async def process_precuts(precuts) -> None:
 
                 logger.info(
                     "[%s] Creating %d embeddings",
-                    precut_id,
+                    attachment_id,
                     preview_count,
                 )
 
@@ -339,7 +386,7 @@ async def process_precuts(precuts) -> None:
                     for preview_index, preview_path in enumerate(preview_paths):
                         logger.debug(
                             "[%s] Embedding scene %d preview %d",
-                            precut_id,
+                            attachment_id,
                             scene_index,
                             preview_index,
                         )
@@ -351,9 +398,11 @@ async def process_precuts(precuts) -> None:
                             embedding=embedding,
                         )
 
+                await link_precut_post(precut, indexed_precut_id)
+
                 logger.info(
                     "[%s] Saved %d embeddings",
-                    precut_id,
+                    attachment_id,
                     preview_count,
                 )
 
@@ -361,7 +410,7 @@ async def process_precuts(precuts) -> None:
 
             logger.info(
                 "[%s] Finished successfully",
-                precut_id,
+                attachment_id,
             )
 
         except Exception:
@@ -369,17 +418,19 @@ async def process_precuts(precuts) -> None:
 
             logger.exception(
                 "[%s] Failed to process precut",
-                precut_id,
+                attachment_id,
             )
 
         progress.set_postfix(
             processed=processed,
+            skipped=skipped,
             failed=failed,
         )
 
     logger.info(
-        "Finished processing precuts. Processed: %d, Failed: %d, Total: %d",
+        "Finished processing precuts. Processed: %d, Skipped: %d, Failed: %d, Total: %d",
         processed,
+        skipped,
         failed,
         total_precuts,
     )

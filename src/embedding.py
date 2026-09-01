@@ -37,19 +37,19 @@ async def search_similar(image: discord.Attachment):
             limit=25,
         )
 
-        return dedupe_results_by_precut(results, limit=5)
+        return dedupe_results_by_indexed_precut(results, limit=5)
 
 
-def dedupe_results_by_precut(results, limit: int = 5):
-    seen_precut_ids: set[int] = set()
+def dedupe_results_by_indexed_precut(results, limit: int = 5):
+    seen_indexed_precut_ids: set[int] = set()
     deduped = []
 
     for result in results:
-        precut_id = result["precut_id"]
-        if precut_id in seen_precut_ids:
+        indexed_precut_id = result["indexed_precut_id"]
+        if indexed_precut_id in seen_indexed_precut_ids:
             continue
 
-        seen_precut_ids.add(precut_id)
+        seen_indexed_precut_ids.add(indexed_precut_id)
         deduped.append(result)
 
         if len(deduped) >= limit:
